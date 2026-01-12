@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 import yaml
 import json
+import shutil
 
 from utils.dataUtil import read_yolo_labels, yolo_to_xyxy, rotate_yolo_bboxes
 
@@ -18,7 +19,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 0.5
 TEXT_THICK = 1
 
-def draw_detections(image_bgr, gt_boxes, pred_boxes, gt_color=(0, 255, 0), pred_color=(0, 128, 255), class_names = None, title = None):
+def draw_detections(image_bgr, gt_boxes, pred_boxes, gt_color=(0, 255, 0), pred_color=(0, 128, 255), class_names = None, title = None, is_xywh=True):
     """
     在 image_bgr 上叠加 YOLO 框，返回绘制后的副本。
     class_names 可选：用于把 class_id 显示成类别名；否则显示数字ID。
@@ -34,9 +35,9 @@ def draw_detections(image_bgr, gt_boxes, pred_boxes, gt_color=(0, 255, 0), pred_
         y_text = max(0, y1 - 5)
         cv2.rectangle(img, (x1, y_text - th - baseline), (x1 + tw, y_text + baseline), gt_color, -1)
         cv2.putText(img, label, (x1, y_text), FONT, FONT_SCALE, (255, 255, 255), TEXT_THICK, cv2.LINE_AA)
-    
+        
     for (cls, x, y, w, h) in pred_boxes:
-        cls_id, x1, y1, x2, y2 = yolo_to_xyxy((cls, x, y, w, h), W, H)
+        cls_id, x1, y1, x2, y2 = yolo_to_xyxy((cls, x, y, w, h), W, H , is_xywh)
         cv2.rectangle(img, (x1, y1), (x2, y2), pred_color, THICKNESS)
         label = class_names[cls_id] if (class_names and 0 <= cls_id < len(class_names)) else f"id:{cls_id}"
         # 文字背景
@@ -75,7 +76,10 @@ def run(input_folder):
             continue
         
         wrong_folder = folder / condition / 'image_wrong_predition'
+        if wrong_folder.exists() and wrong_folder.is_dir():
+            shutil.rmtree(wrong_folder)
         wrong_folder.mkdir(parents=True, exist_ok=True)
+        is_xywh = False # pred_labels 是 xywh 格式或者是 xyxy 格式
         for img_path in img_list:
             wrong_image_folder = wrong_folder / Path(img_path).stem
             wrong_image_folder.mkdir(parents=True, exist_ok=True)
@@ -87,16 +91,17 @@ def run(input_folder):
             
             gt_boxes = read_yolo_labels(reference_folder / (Path(img_path).stem + ".txt")) # read gt results
             original_boxes = read_yolo_labels(Path(input_folder) / 'pred_labels' / (Path(img_path).stem + ".txt")) # read gt results
-            original_vis = draw_detections(original_img, gt_boxes, original_boxes, gt_color=COLOR_GT, pred_color=COLOR_PRED, class_names=class_names, title="Original Prediction")
+            original_vis = draw_detections(original_img, gt_boxes, original_boxes, gt_color=COLOR_GT, pred_color=COLOR_PRED, class_names=class_names, title="Original Prediction", is_xywh=is_xywh)
             
             adv_image_path = folder / condition / 'images' / img_path
+            print(adv_image_path)
             adv_image = cv2.imread(str(adv_image_path))
             H, W = adv_image.shape[:2]
             if 'rotation' in condition:
                 angle = int(condition.split('_')[-1])
                 gt_boxes = rotate_yolo_bboxes(gt_boxes, angle, W, H)
             adv_boxes = read_yolo_labels(folder / condition / 'pred_labels' / (Path(img_path).stem + ".txt"))
-            adv_vis = draw_detections(adv_image, gt_boxes, adv_boxes, gt_color=COLOR_GT, pred_color=COLOR_PRED, class_names=class_names, title="Perturbed Prediction")
+            adv_vis = draw_detections(adv_image, gt_boxes, adv_boxes, gt_color=COLOR_GT, pred_color=COLOR_PRED, class_names=class_names, title="Perturbed Prediction", is_xywh=is_xywh)
 
             # 保存图片（保持原始文件名）
             out_original_path = wrong_image_folder / 'original.jpg'
@@ -105,4 +110,6 @@ def run(input_folder):
             cv2.imwrite(str(out_adv_path), adv_vis)
             
 if __name__ == "__main__":
-    run("./demo_images")
+    # run("./demo_images")
+    # run("/root/autodl-tmp/project/Adversarial-Attack-On-YOLOv8/dataset/aidx_round_2_test_dataset")
+    run("/root/autodl-tmp/project/Adversarial-Attack-On-YOLOv8/dataset/aidx_upload_week4")

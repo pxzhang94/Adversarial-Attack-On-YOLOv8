@@ -3,6 +3,7 @@ import cv2
 from pathlib import Path
 from skimage.metrics import structural_similarity as ssim
 import pandas as pd
+import json
 
 def compute_metrics(img1, img2):
     """
@@ -41,8 +42,8 @@ def compute_metrics(img1, img2):
 def run(input_folder):
     folder = Path(input_folder) / 'results'
     transformation_paths = sorted([p for p in folder.iterdir() if p.is_dir()])
-    # result_dict = {}
-    result_array = []
+    result_dict = {}
+    # result_array = []
     for transformation_path in transformation_paths:
         image_paths = sorted([p for p in (transformation_path / 'images').iterdir() if p.suffix.lower() == ".jpg"])
         metric = np.asarray([0.0, 0.0, 0.0])
@@ -57,17 +58,20 @@ def run(input_folder):
             
             metric += compute_metrics(original_img, adversarial_img)
         metric = metric / len(image_paths)
-        # result = {'L2': metric[0], 'Linf': metric[1], 'SSIM': metric[2]}
-        # result_dict[transformation_path.stem] = result
-        result_array.append([str(transformation_path).split('/')[-1], metric[0], metric[1], metric[2]])
-    print(result_array)
-    # with open(str(folder / 'metrics.json'), "w", encoding="utf-8") as f:
-    #     json.dump(result_dict, f, ensure_ascii=False, indent=4)
+        result = {'L2': metric[0], 'Linf': metric[1], 'SSIM': metric[2]}
+        result_dict[transformation_path.name] = result
+    #     result_array.append([str(transformation_path).split('/')[-1], metric[0], metric[1], metric[2]])
+    # print(result_array)
+    with open(str(folder / 'metrics.json'), "w", encoding="utf-8") as f:
+        json.dump(result_dict, f, ensure_ascii=False, indent=4)
     
-    # 转换为 DataFrame
-    df = pd.DataFrame(result_array, columns=["Condition", "L2", "Linf", "SSIM"])
-    # 保存为 CSV
-    df.to_csv(str(folder / 'metrics.csv'), index=False)
+    # # 转换为 DataFrame
+    # df = pd.DataFrame(result_array, columns=["Condition", "L2", "Linf", "SSIM"])
+    # # 保存为 CSV
+    # df.to_csv(str(folder / 'metrics.csv'), index=False)
     
 if __name__ == "__main__":
     run("./demo_images")
+    # run("/root/autodl-tmp/project/Adversarial-Attack-On-YOLOv8/dataset/aidx_round_2_test_dataset")
+    # run("/root/autodl-tmp/project/Adversarial-Attack-On-YOLOv8/dataset/aidx_upload_week4")
+
