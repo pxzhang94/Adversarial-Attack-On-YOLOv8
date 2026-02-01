@@ -70,22 +70,28 @@ def batch_inference(model, img_paths, input_size, output_label_dir, normalize=No
                 conf = row[5]
                 f.write(f"{c} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f} {conf:.6f}\n")
 
-def acc_cal(pred_folder, reference_folder, img_folder, is_xywh=True):
+def acc_cal(reference_folder, ori_pred_folder, pred_folder, img_folder, iou_thresh=0.5, is_xywh=True):
     image_total = 0
     image_correct = 0
     object_total = 0
     object_correct = 0
-    image_wrong_path = []
+    object_ori_correct = 0
+    object_robust = 0
+    image_diff_file = []
     pred_paths = sorted([p for p in pred_folder.iterdir() if p.suffix.lower() == ".txt"])   
     objects_per_label = {}
-    correct_per_label = {}    
+    correct_per_label = {}   
+    ori_correct_per_label = {}
+    robust_per_label = {} 
     for pred_path in pred_paths:
-        img_path = img_folder / f"{pred_path.stem}.jpg" 
+        img_path = img_folder / f"{pred_path.stem}.jpg"
+        if img_path.exists() == False:
+            img_path = img_folder / f"{pred_path.stem}.png"
         reference_path = reference_folder / pred_path.name
         # 读取图像
         img = cv2.imread(str(img_path))
         if img is None:
-            print(f"无法读取图像: {img_path}")
+            print(f"Can not load image: {img_path}")
             continue
         H, W = img.shape[:2]  # 高, 宽
         
@@ -95,17 +101,24 @@ def acc_cal(pred_folder, reference_folder, img_folder, is_xywh=True):
             angle = int(pred_path_str.split('/')[-3].split('_')[-1])
             gts_yolo = rotate_yolo_bboxes(gts_yolo, angle, W, H)
         
+        ori_yolo = read_yolo_labels(ori_pred_folder / pred_path.name)
+        
         preds_yolo = read_yolo_labels(pred_path)
-        img_ok, obj_tot, obj_ok, objs_per_label, crt_per_label = match_and_score_single(gts_yolo, preds_yolo, W, H, iou_thresh, is_xywh)
+        img_ok, obj_tot, obj_ok, obj_ori_ok, obj_robust, objs_per_label, crt_per_label, ori_ok_per_label, rob_per_label = match_and_score_single(gts_yolo, ori_yolo, preds_yolo, W, H, iou_thresh, is_xywh)
+        # img_ok, obj_tot, obj_ok, objs_per_label, crt_per_label = match_and_score_single(gts_yolo, ori_yolo, preds_yolo, W, H, iou_thresh, is_xywh)
         image_total += 1
         image_correct += int(img_ok)
         object_total += obj_tot
         object_correct += obj_ok
+        object_ori_correct += obj_ori_ok
+        object_robust += obj_robust
         for k in objs_per_label.keys():
             objects_per_label[k] = objects_per_label.get(k, 0) + objs_per_label[k]
             correct_per_label[k] = correct_per_label.get(k, 0) + crt_per_label[k]
-        if obj_ok != len(gts_yolo):
-            image_wrong_path.append(f"{pred_path.stem}.jpg")
+            ori_correct_per_label[k] = ori_correct_per_label.get(k, 0) + ori_ok_per_label[k]
+            robust_per_label[k] = robust_per_label.get(k, 0) + rob_per_label[k]
+        if obj_robust > 0:
+            image_diff_file.append(f"{pred_path.stem}.jpg")
         
     summary = {
         "image_total": image_total,
@@ -113,11 +126,17 @@ def acc_cal(pred_folder, reference_folder, img_folder, is_xywh=True):
         "image_acc": image_correct / max(1, image_total),
         "object_total": object_total,
         "object_correct": object_correct,
-        "object_acc": (object_correct / object_total) if object_total > 0 else None,
+        "object_acc": (round(object_correct / object_total, 4)) if object_total > 0 else None,
+        "object_ori_correct": object_ori_correct,
+        "object_robust": object_robust,
+        "robustness": (round(1 - object_robust / max(1, object_ori_correct), 4)) if object_ori_correct > 0 else None,
         "objects_per_label": objects_per_label,
         "correct_per_label": correct_per_label,
+        "ori_correct_per_label": ori_correct_per_label,
+        "robust_per_label": robust_per_label,
         "acc_per_label": {k: (correct_per_label[k] / objects_per_label[k]) if objects_per_label[k] > 0 else None for k in objects_per_label},
-        "image_wrong_path": image_wrong_path,
+        "robustness_per_label": {k: (round(1 - robust_per_label[k] / max(1, ori_correct_per_label[k]), 4)) if ori_correct_per_label[k] > 0 else None for k in objects_per_label},
+        "image_diff_file": image_diff_file,
     }
     return summary
 
@@ -127,7 +146,7 @@ def run(model_file=None, input_folder=None, input_size=None, normalize=None, mea
     original_pred_folder = Path(input_folder) / 'pred_labels'
     original_pred_folder.mkdir(parents=True, exist_ok=True)
 
-    output_folder = Path(input_folder) / 'results'
+    output_folder = Path(input_folder) / 'results_test'
     img_paths = sorted([p for p in original_image_folder.iterdir() if p.suffix.lower() in [".jpg", ".jpeg", ".png"]])
     if not img_paths:
         print(f"Do not find image in {input_folder}")
@@ -157,37 +176,37 @@ def run(model_file=None, input_folder=None, input_size=None, normalize=None, mea
     # 1. 预测原始图像
     batch_inference(model, img_paths, input_size, original_pred_folder, normalize, mean, std, device, conf_thresh, iou_thresh)
     
-    # # 2. 生成图像
-    # for idx, img_path in enumerate(img_paths):
-    #     image = cv2.imread(str(img_path))
-    #     if image is None:
-    #         print(f"Can not load image: {img_path}")
-    #         continue
-    #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    #     image = cv2.resize(image, input_size)
+    # 2. 生成图像
+    for idx, img_path in enumerate(img_paths):
+        image = cv2.imread(str(img_path))
+        if image is None:
+            print(f"Can not load image: {img_path}")
+            continue
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, input_size)
 
-    #     transforms = list(TRANSFORM_FUNCTION.keys())
-    #     for transform in transforms:
-    #         transform_function = TRANSFORM_FUNCTION[transform]
-    #         transform_factors = TRANSFORM_CONFIG[transform]
-    #         for factor in transform_factors:
-    #             output_image_folder = output_folder / f"{transform}_{factor}" / 'images'
-    #             if idx == 0:
-    #                 output_image_folder.mkdir(parents=True, exist_ok=True)
-    #             if transform in ['togm', 'togv', 'togf']:
-    #                 if (Path(input_folder) / 'labels').exists():
-    #                     reference_folder = Path(input_folder) / 'labels'
-    #                 else:
-    #                     reference_folder = Path(input_folder) / 'pred_labels'
+        transforms = list(TRANSFORM_FUNCTION.keys())
+        for transform in transforms:
+            transform_function = TRANSFORM_FUNCTION[transform]
+            transform_factors = TRANSFORM_CONFIG[transform]
+            for factor in transform_factors:
+                output_image_folder = output_folder / f"{transform}_{factor}" / 'images'
+                if idx == 0:
+                    output_image_folder.mkdir(parents=True, exist_ok=True)
+                if transform in ['togm', 'togv', 'togf']:
+                    if (Path(input_folder) / 'labels').exists():
+                        reference_folder = Path(input_folder) / 'labels'
+                    else:
+                        reference_folder = Path(input_folder) / 'pred_labels'
                         
-    #                 # transformed_img = transform_function(image, str(reference_folder / f"{img_path.stem}.txt"), factor)
-    #                 transformed_img = transform_function(model, image, factor, normalize, mean, std, device)
-    #             else:
-    #                 transformed_img = transform_function(image, factor)
+                    # transformed_img = transform_function(image, str(reference_folder / f"{img_path.stem}.txt"), factor)
+                    transformed_img = transform_function(model, image, factor, normalize, mean, std, device)
+                else:
+                    transformed_img = transform_function(image, factor)
                 
-    #             stored_img = cv2.cvtColor(transformed_img, cv2.COLOR_RGB2BGR)
-    #             cv2.imwrite(str(output_image_folder / img_path.stem)+'.png', stored_img)
-    # print(f"Images saved in {output_folder}")
+                stored_img = cv2.cvtColor(transformed_img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(output_image_folder / img_path.stem)+'.png', stored_img)
+    print(f"Images saved in {output_folder}")
     
     # 3. 对所有生成的图像进行目标检测
     transform_folders = sorted([p for p in output_folder.iterdir() if p.is_dir()])
@@ -201,28 +220,28 @@ def run(model_file=None, input_folder=None, input_size=None, normalize=None, mea
         transform_pred_folder.mkdir(parents=True, exist_ok=True)
         batch_inference(model, transform_img_paths, input_size, transform_pred_folder, normalize, mean, std, device, conf_thresh, iou_thresh)
 
-    # # 4. 将生成图像的识别结果与ground-truth（labels）或原始图像的检测结果（pred_labels）进行比较
-    # # TODO: False Positive need to be considered
-    # result_dict = {}
-    # if (Path(input_folder) / 'labels').exists():
-    #     reference_folder = Path(input_folder) / 'labels'
-    # else:
-    #     reference_folder = Path(input_folder) / 'pred_labels'
+    # 4. 将生成图像的识别结果与ground-truth（labels）或原始图像的检测结果（pred_labels）进行比较
+    # TODO: False Positive need to be considered
+    result_dict = {}
+    if (Path(input_folder) / 'labels').exists():
+        reference_folder = Path(input_folder) / 'labels'
+    else:
+        reference_folder = Path(input_folder) / 'pred_labels'
     
-    # is_xywh = False # pred_labels 是 xywh 格式或者是 xyxy 格式
-    # result_dict['original'] = acc_cal(original_pred_folder, reference_folder, original_image_folder, is_xywh)
-    # transform_folders = sorted([p for p in output_folder.iterdir() if p.is_dir()])
-    # for transform_folder in transform_folders:
-    #     transform_img_folder = transform_folder / 'images'
-    #     transform_label_folder = transform_folder / 'pred_labels'
-    #     result_dict[transform_folder.name] = acc_cal(transform_label_folder, reference_folder, transform_img_folder, is_xywh)
-    # print(result_dict)
-    # with open(str(output_folder / 'summary.json'), "w", encoding="utf-8") as f:
-    #     json.dump(result_dict, f, ensure_ascii=False, indent=4)
+    is_xywh = True # pred_labels 是 xywh 格式或者是 xyxy 格式
+    result_dict['original'] = acc_cal(reference_folder, original_pred_folder, original_pred_folder, original_image_folder, iou_thresh, is_xywh)
+    transform_folders = sorted([p for p in output_folder.iterdir() if p.is_dir()])
+    for transform_folder in transform_folders:
+        transform_img_folder = transform_folder / 'images'
+        transform_label_folder = transform_folder / 'pred_labels'
+        result_dict[transform_folder.name] = acc_cal(reference_folder, original_pred_folder, transform_label_folder, transform_img_folder, iou_thresh, is_xywh)
+    print(result_dict)
+    with open(str(output_folder / 'diagnose_results.json'), "w", encoding="utf-8") as f:
+        json.dump(result_dict, f, ensure_ascii=False, indent=4)
 
 def extract_results_to_excel(project_path):
     # === 1. 读取文件 ===
-    json_path = Path(project_path) / 'results' / 'summary.json'
+    json_path = Path(project_path) / 'results' / 'diagnose_results.json'
     yaml_path = Path(project_path) / 'data.yaml'
     with open(json_path, "r") as f:
         data = json.load(f)
